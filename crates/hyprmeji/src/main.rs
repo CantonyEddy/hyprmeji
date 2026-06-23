@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+use hyprmeji_input::InputHandler;
 use hyprmeji_ipc::IpcClient;
 use hyprmeji_loader as loader;
 use hyprmeji_render::Renderer;
@@ -72,33 +73,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("shimeji chargé depuis {}", cli.shimeji_dir.display());
 
     // --- 3. IPC Hyprland : client + thread d'écoute ------------------------
-    // Le listener tourne dans son propre thread et alimente un
-    // `Arc<RwLock<Vec<WindowInfo>>>` que la boucle lit sans bloquer.
     let ipc = IpcClient::new().map_err(|e| format!("connexion IPC Hyprland : {e}"))?;
     let window_list = ipc.window_list();
     let _ipc_handle = ipc.start_listener();
     log::info!("thread IPC Hyprland démarré");
 
     // --- 4. Rendu Wayland (surface overlay layer-shell) -------------------
-    // `Renderer::new` établit lui-même la connexion Wayland et crée la surface.
-    let renderer =
-        Renderer::new().map_err(|e| format!("initialisation du rendu Wayland : {e}"))?;
+    let renderer = Renderer::new().map_err(|e| format!("initialisation du rendu Wayland : {e}"))?;
     log::info!("surface Wayland initialisée");
 
     // --- 5. Entrée souris ------------------------------------------------
-    // LIMITATION (API publique actuelle) : `hyprmeji-input::InputHandler::new`
-    // exige un `&WlSeat` et un `&QueueHandle<D>` où `D` est l'`AppState` privé de
-    // `hyprmeji-render`. Le binaire ne peut donc pas construire d'`InputHandler`
-    // sans une couture d'intégration côté render (qui détient seat + queue), ni
-    // accéder à des types privés. Le drag est donc inactif tant que cette
-    // couture n'existe pas dans `hyprmeji-render` — changement hors périmètre de
-    // ce binaire. La boucle fonctionne sans input.
+    let input = InputHandler::new(
+        renderer.wl_seat(),
+        renderer.wl_surface().clone(),
+        renderer.qh(),
+    )
+    .map_err(|e| format!("initialisation de l'input : {e}"))?;
+    log::info!("gestionnaire d'input initialisé");
 
     // --- 6. Boucle principale 60fps --------------------------------------
     r#loop::run(r#loop::Context {
         sprite_sheet,
         window_list,
         renderer,
+        input,
         shutdown,
     });
 
@@ -106,11 +104,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Installe les handlers SIGTERM/SIGINT via `signal-hook`.
-///
-/// On utilise `signal_hook::flag::register`, qui se contente de positionner un
-/// `AtomicBool` de façon async-signal-safe (pas d'UB, pas d'allocation dans le
-/// handler). La boucle teste ce drapeau à chaque tick et sort proprement, ce
-/// qui libère la surface Wayland (`Renderer` est `Drop`é en fin de boucle).
 fn install_signal_handlers(shutdown: &Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(shutdown))
