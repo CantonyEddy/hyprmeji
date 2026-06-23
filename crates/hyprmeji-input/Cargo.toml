@@ -1,6 +1,11 @@
+# crates/hyprmeji-input/Cargo.toml
 [package]
 name = "hyprmeji-input"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+hyprmeji-core = { path = "../hyprmeji-core" }
+smithay-client-toolkit = "0.18"
+thiserror = "1"
+log = "0.4"
