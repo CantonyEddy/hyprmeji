@@ -1,6 +1,28 @@
+# crates/hyprmeji/Cargo.toml
 [package]
 name = "hyprmeji"
-version = "0.1.0"
-edition = "2024"
+version = "1.0.0"
+edition = "2021"
+description = "Shimeji natif Wayland pour Hyprland — binaire principal"
+license = "MIT"
+
+[[bin]]
+name = "hyprmeji"
+path = "src/main.rs"
 
 [dependencies]
+hyprmeji-core   = { path = "../hyprmeji-core" }
+hyprmeji-loader = { path = "../hyprmeji-loader" }
+hyprmeji-ipc    = { path = "../hyprmeji-ipc" }
+# hyprmeji-input : déclaré car l'input fait partie du binaire par conception,
+# mais non référencé tant que hyprmeji-render n'expose pas la couture permettant
+# de construire un InputHandler (cf. LIMITATION dans main.rs / loop.rs).
+hyprmeji-input  = { path = "../hyprmeji-input" }
+hyprmeji-render = { path = "../hyprmeji-render" }
+clap            = { version = "4", features = ["derive"] }
+signal-hook     = "0.3"
+log             = "0.4"
+env_logger      = "0.11"
+# parking_lot : uniquement pour nommer le type de garde du WindowList
+# (`Arc<parking_lot::RwLock<Vec<WindowInfo>>>`) ré-exporté par hyprmeji-ipc.
+parking_lot     = "0.12"
