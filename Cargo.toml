@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/hyprmeji",
+    "crates/hyprmeji-core",
+    "crates/hyprmeji-render",
+    "crates/hyprmeji-ipc",
+    "crates/hyprmeji-loader",
+    "crates/hyprmeji-input",
+]
+resolver = "2"
