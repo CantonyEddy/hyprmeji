@@ -1,6 +1,17 @@
+# crates/hyprmeji-loader/Cargo.toml
 [package]
 name = "hyprmeji-loader"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+hyprmeji-core = { path = "../hyprmeji-core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+quick-xml = { version = "0.31", features = ["serialize"] }
+image = { version = "0.24", default-features = false, features = ["png"] }
+log = "0.4"
+thiserror = "1"
+
+[dev-dependencies]
+# Fixtures en mémoire : un PNG 1x1 généré via `image` suffit, pas de dep extra.
