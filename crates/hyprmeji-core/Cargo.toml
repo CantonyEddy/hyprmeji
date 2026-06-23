@@ -1,6 +1,11 @@
+# crates/hyprmeji-core/Cargo.toml
 [package]
 name = "hyprmeji-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+thiserror = "1"
+
+[dev-dependencies]
+# rien de spécial requis
