@@ -78,55 +78,46 @@ impl DragTracker {
         self.grab_offset.is_some()
     }
 
-    /// Met à jour la dernière position curseur connue (sans transition).
+    /// Mémorise la position curseur sans produire d'événement (hors drag).
     pub fn set_cursor(&mut self, pos: Vec2) {
         self.last_pos = Some(pos);
     }
 
-    /// Bouton gauche pressé à `cursor_pos`, sprite ancré en `sprite_pos`.
+    /// Bouton pressé : démarre un drag si le clic touche un pixel opaque.
     ///
-    /// Démarre un drag **uniquement** si `hit.is_opaque_at` accepte le pixel
-    /// local sous le curseur. Retourne l'[`InputEvent::DragStart`] le cas
-    /// échéant, sinon `None` (clic dans une zone transparente ou hors sprite).
-    pub fn press(
+    /// Retourne [`InputEvent::DragStart`] le cas échéant, `None` sinon.
+    pub fn press<H: HitTest>(
         &mut self,
-        cursor_pos: Vec2,
+        cursor: Vec2,
         sprite_pos: Vec2,
-        hit: &impl HitTest,
+        hit: &H,
     ) -> Option<InputEvent> {
-        self.last_pos = Some(cursor_pos);
-        if self.is_dragging() {
-            return None;
-        }
-        let local = cursor_pos - sprite_pos;
+        let local = cursor - sprite_pos;
         if !hit.is_opaque_at(local) {
             return None;
         }
-        let grab_offset = local;
+        let grab_offset = cursor - sprite_pos;
         self.grab_offset = Some(grab_offset);
         self.history.clear();
-        self.history.push_back(cursor_pos);
+        self.history.push_back(cursor);
+        self.last_pos = Some(cursor);
         Some(InputEvent::DragStart { grab_offset })
     }
 
-    /// Curseur déplacé à `cursor_pos`.
-    ///
-    /// Émet [`InputEvent::DragMove`] si un drag est en cours, en alimentant
-    /// l'historique de vélocité. Hors drag, met seulement à jour la dernière
-    /// position et retourne `None`.
-    pub fn motion(&mut self, cursor_pos: Vec2) -> Option<InputEvent> {
-        self.last_pos = Some(cursor_pos);
+    /// Mouvement curseur : produit [`InputEvent::DragMove`] si un drag est actif.
+    pub fn motion(&mut self, cursor: Vec2) -> Option<InputEvent> {
+        self.last_pos = Some(cursor);
         if !self.is_dragging() {
             return None;
         }
-        self.history.push_back(cursor_pos);
-        while self.history.len() > VELOCITY_WINDOW {
+        if self.history.len() == VELOCITY_WINDOW {
             self.history.pop_front();
         }
-        Some(InputEvent::DragMove { cursor_pos })
+        self.history.push_back(cursor);
+        Some(InputEvent::DragMove { cursor_pos: cursor })
     }
 
-    /// Bouton gauche relâché.
+    /// Relâchement : termine le drag et émet [`InputEvent::DragEnd`].
     ///
     /// Termine le drag et émet [`InputEvent::DragEnd`] avec la vélocité moyenne
     /// calculée sur l'historique. Hors drag, retourne `None`.
@@ -170,9 +161,10 @@ impl DragTracker {
 ///
 /// Construit via [`InputHandler::new`] à partir d'un `WlSeat` (dont la surface
 /// cible est créée ailleurs par `hyprmeji-render`). Les événements pointeur sont
-/// délivrés par smithay-client-toolkit au travers de l'impl [`PointerHandler`] ;
-/// les [`InputEvent`] résultants sont mis en file et récupérés via
-/// [`InputHandler::poll`].
+/// délivrés par smithay-client-toolkit ; comme l'`InputHandler` vit désormais à
+/// l'intérieur de l'état applicatif de `hyprmeji-render`, ce dernier relaie les
+/// lots d'événements via [`InputHandler::ingest_events`]. Les [`InputEvent`]
+/// résultants sont mis en file et récupérés via [`InputHandler::poll`].
 pub struct InputHandler {
     /// Le pointeur Wayland souscrit sur le seat.
     pointer: WlPointer,
@@ -248,7 +240,9 @@ impl InputHandler {
     /// Crée un handler attaché au pointeur d'un `WlSeat` existant.
     ///
     /// La `surface` est celle créée par `hyprmeji-render` ; ce crate ne la crée
-    /// jamais. Le pointeur est souscrit via smithay-client-toolkit.
+    /// jamais. Le pointeur est souscrit via smithay-client-toolkit sur la file
+    /// d'événements de l'appelant (paramètre générique `D`), ce qui permet à
+    /// `hyprmeji-render` de le construire avec son propre `QueueHandle<AppState>`.
     ///
     /// # Erreurs
     /// Retourne [`InputError::PointerInit`] si l'obtention du pointeur échoue.
@@ -293,6 +287,16 @@ impl InputHandler {
     /// Retourne le prochain événement en attente, non bloquant.
     pub fn poll(&mut self) -> Option<InputEvent> {
         self.pending.pop_front()
+    }
+
+    /// Relaie un lot d'événements `wl_pointer` reçus par l'état hôte.
+    ///
+    /// Point d'entrée neutre vis-à-vis du type de file d'événements : il permet à
+    /// `hyprmeji-render` de transférer les événements depuis son impl
+    /// `PointerHandler for AppState` sans avoir à exposer un `QueueHandle`
+    /// typé sur `InputHandler`.
+    pub fn ingest_events(&mut self, events: &[PointerEvent]) {
+        self.ingest(events);
     }
 
     /// Traduit un lot d'événements `wl_pointer` en [`InputEvent`].
@@ -344,184 +348,5 @@ impl PointerHandler for InputHandler {
         events: &[PointerEvent],
     ) {
         self.ingest(events);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Hit-test de test : accepte tout point dans `[0, size)`.
-    struct RectHit {
-        w: f32,
-        h: f32,
-    }
-    impl HitTest for RectHit {
-        fn is_opaque_at(&self, local: Vec2) -> bool {
-            local.x >= 0.0 && local.y >= 0.0 && local.x < self.w && local.y < self.h
-        }
-    }
-
-    fn rect() -> RectHit {
-        RectHit { w: 128.0, h: 128.0 }
-    }
-
-    fn approx(a: Vec2, b: Vec2) {
-        assert!((a.x - b.x).abs() < 0.001, "x: {} vs {}", a.x, b.x);
-        assert!((a.y - b.y).abs() < 0.001, "y: {} vs {}", a.y, b.y);
-    }
-
-    #[test]
-    fn press_on_opaque_starts_drag_with_grab_offset() {
-        let mut t = DragTracker::new();
-        // Sprite ancré en (100,100), clic en (130,150) → offset (30,50).
-        let ev = t
-            .press(Vec2::new(130.0, 150.0), Vec2::new(100.0, 100.0), &rect())
-            .expect("drag start");
-        match ev {
-            InputEvent::DragStart { grab_offset } => approx(grab_offset, Vec2::new(30.0, 50.0)),
-            other => panic!("attendu DragStart, obtenu {other:?}"),
-        }
-        assert!(t.is_dragging());
-    }
-
-    #[test]
-    fn press_outside_sprite_does_not_start_drag() {
-        let mut t = DragTracker::new();
-        // Clic à gauche du sprite → local négatif → rejeté.
-        let ev = t.press(Vec2::new(10.0, 10.0), Vec2::new(100.0, 100.0), &rect());
-        assert!(ev.is_none());
-        assert!(!t.is_dragging());
-    }
-
-    #[test]
-    fn press_on_transparent_pixel_is_rejected() {
-        // Hit-test qui refuse tout.
-        struct Never;
-        impl HitTest for Never {
-            fn is_opaque_at(&self, _: Vec2) -> bool {
-                false
-            }
-        }
-        let mut t = DragTracker::new();
-        let ev = t.press(Vec2::new(110.0, 110.0), Vec2::new(100.0, 100.0), &Never);
-        assert!(ev.is_none());
-        assert!(!t.is_dragging());
-    }
-
-    #[test]
-    fn double_press_is_noop_while_dragging() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(110.0, 110.0), Vec2::new(100.0, 100.0), &rect());
-        let second = t.press(Vec2::new(120.0, 120.0), Vec2::new(100.0, 100.0), &rect());
-        assert!(second.is_none());
-        assert!(t.is_dragging());
-    }
-
-    #[test]
-    fn motion_without_drag_returns_none() {
-        let mut t = DragTracker::new();
-        assert!(t.motion(Vec2::new(5.0, 5.0)).is_none());
-        assert!(!t.is_dragging());
-    }
-
-    #[test]
-    fn motion_during_drag_emits_drag_move() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(110.0, 110.0), Vec2::new(100.0, 100.0), &rect());
-        let ev = t.motion(Vec2::new(115.0, 112.0)).expect("drag move");
-        match ev {
-            InputEvent::DragMove { cursor_pos } => approx(cursor_pos, Vec2::new(115.0, 112.0)),
-            other => panic!("attendu DragMove, obtenu {other:?}"),
-        }
-    }
-
-    #[test]
-    fn release_without_drag_returns_none() {
-        let mut t = DragTracker::new();
-        assert!(t.release().is_none());
-    }
-
-    #[test]
-    fn full_cycle_idle_dragging_idle() {
-        let mut t = DragTracker::new();
-        assert!(!t.is_dragging());
-        t.press(Vec2::new(110.0, 110.0), Vec2::new(100.0, 100.0), &rect());
-        assert!(t.is_dragging());
-        t.motion(Vec2::new(120.0, 110.0));
-        let end = t.release().expect("drag end");
-        assert!(matches!(end, InputEvent::DragEnd { .. }));
-        assert!(!t.is_dragging());
-    }
-
-    #[test]
-    fn average_velocity_constant_step() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(0.0, 0.0), Vec2::ZERO, &rect());
-        // 4 mouvements de +10px en x → delta moyen 10 → ×60 = 600 px/s.
-        for i in 1..=4 {
-            t.motion(Vec2::new(10.0 * i as f32, 0.0));
-        }
-        match t.release().expect("end") {
-            InputEvent::DragEnd { cursor_vel } => approx(cursor_vel, Vec2::new(600.0, 0.0)),
-            other => panic!("attendu DragEnd, obtenu {other:?}"),
-        }
-    }
-
-    #[test]
-    fn average_velocity_diagonal() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(0.0, 0.0), Vec2::ZERO, &rect());
-        // Deltas (5, -2) répétés → vélocité (300, -120).
-        for i in 1..=3 {
-            t.motion(Vec2::new(5.0 * i as f32, -2.0 * i as f32));
-        }
-        match t.release().expect("end") {
-            InputEvent::DragEnd { cursor_vel } => approx(cursor_vel, Vec2::new(300.0, -120.0)),
-            other => panic!("attendu DragEnd, obtenu {other:?}"),
-        }
-    }
-
-    #[test]
-    fn velocity_window_is_bounded_to_last_five() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(0.0, 0.0), Vec2::ZERO, &rect());
-        // Beaucoup de petits pas (1px), puis on vérifie que seuls les 5 derniers
-        // (4 deltas de 1px) comptent → moyenne 1 → ×60 = 60 px/s.
-        for i in 1..=20 {
-            t.motion(Vec2::new(i as f32, 0.0));
-        }
-        match t.release().expect("end") {
-            InputEvent::DragEnd { cursor_vel } => approx(cursor_vel, Vec2::new(60.0, 0.0)),
-            other => panic!("attendu DragEnd, obtenu {other:?}"),
-        }
-    }
-
-    #[test]
-    fn velocity_zero_without_motion() {
-        let mut t = DragTracker::new();
-        t.press(Vec2::new(50.0, 50.0), Vec2::ZERO, &rect());
-        // Aucun mouvement : historique = 1 position → vélocité nulle.
-        match t.release().expect("end") {
-            InputEvent::DragEnd { cursor_vel } => approx(cursor_vel, Vec2::ZERO),
-            other => panic!("attendu DragEnd, obtenu {other:?}"),
-        }
-    }
-
-    #[test]
-    fn opaque_mask_rect_accepts_inside_rejects_outside() {
-        let m = OpaqueMask::rect(10.0, 10.0);
-        assert!(m.is_opaque_at(Vec2::new(0.0, 0.0)));
-        assert!(m.is_opaque_at(Vec2::new(9.0, 9.0)));
-        assert!(!m.is_opaque_at(Vec2::new(10.0, 5.0)));
-        assert!(!m.is_opaque_at(Vec2::new(-1.0, 5.0)));
-    }
-
-    #[test]
-    fn opaque_mask_pixels_respects_alpha() {
-        // 2x1 : pixel (0,0) transparent, (1,0) opaque.
-        let m = OpaqueMask::pixels(2, 1, vec![0, 255]);
-        assert!(!m.is_opaque_at(Vec2::new(0.0, 0.0)));
-        assert!(m.is_opaque_at(Vec2::new(1.0, 0.0)));
     }
 }

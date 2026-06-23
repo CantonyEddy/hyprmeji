@@ -34,6 +34,13 @@ pub enum RenderError {
     #[error("la layer surface n'est pas encore configurée")]
     NotConfigured,
 
+    /// Échec d'initialisation de la gestion d'input (`hyprmeji-input`).
+    ///
+    /// L'input vit désormais à l'intérieur de ce crate ; cette variante remonte
+    /// toute erreur survenue lors de la construction du `InputHandler`.
+    #[error("initialisation de l'input échouée : {0}")]
+    Input(String),
+
     /// Dimensions de frame invalides (largeur ou hauteur nulle).
     #[error("dimensions de frame invalides : {width}x{height}")]
     InvalidDimensions {

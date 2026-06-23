@@ -1,24 +1,32 @@
 // crates/hyprmeji-render/src/renderer.rs
 //! `Renderer` : connexion Wayland, état applicatif SCTK et rendu des frames.
+//!
+//! L'input souris vit entièrement dans ce crate : le `QueueHandle<AppState>`
+//! reste interne et n'est jamais exposé. Le binaire se contente d'appeler
+//! [`Renderer::poll_input`].
 
 use hyprmeji_core::{AnimationFrame, Vec2};
+use hyprmeji_input::{InputEvent, InputHandler};
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::delegate_compositor;
 use smithay_client_toolkit::delegate_layer;
 use smithay_client_toolkit::delegate_output;
+use smithay_client_toolkit::delegate_pointer;
 use smithay_client_toolkit::delegate_registry;
 use smithay_client_toolkit::delegate_seat;
 use smithay_client_toolkit::delegate_shm;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::WlOutput;
+use smithay_client_toolkit::reexports::client::protocol::wl_pointer::WlPointer;
 use smithay_client_toolkit::reexports::client::protocol::wl_region::WlRegion;
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, EventQueue, QueueHandle};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
@@ -38,14 +46,16 @@ struct AppState {
     compositor_state: CompositorState,
     shm: Shm,
     /// État du/des seat(s). Alimente la découverte du `wl_seat` et de ses
-    /// capacités (le pointeur est souscrit côté `hyprmeji-input`).
+    /// capacités. Le pointeur est souscrit en interne via l'`InputHandler`.
     seat_state: SeatState,
     surface: Surface,
     configure_seen: bool,
-    /// `wl_seat` retenu (le premier annoncé par le compositor), exposé au
-    /// binaire pour construire un `InputHandler`. `None` tant qu'aucun seat n'a
-    /// été annoncé.
+    /// `wl_seat` retenu (le premier annoncé par le compositor). `None` tant
+    /// qu'aucun seat n'a été annoncé.
     seat: Option<WlSeat>,
+    /// Gestion de l'input souris, vivant entièrement dans ce crate. `None` tant
+    /// que le seat n'est pas disponible pour construire le `InputHandler`.
+    input_handler: Option<InputHandler>,
 }
 
 impl AppState {
@@ -95,6 +105,7 @@ impl Renderer {
             surface,
             configure_seen: false,
             seat: None,
+            input_handler: None,
         };
 
         event_queue
@@ -107,6 +118,16 @@ impl Renderer {
         // défensive si l'annonce arrive plus tard.
         if state.seat.is_none() {
             state.seat = state.seat_state.seats().next();
+        }
+
+        // Une fois le seat disponible, on construit l'`InputHandler` et on
+        // l'attache à l'état. L'input vit désormais entièrement dans ce crate :
+        // le `QueueHandle<AppState>` reste interne et n'est jamais exposé.
+        if let Some(seat) = state.seat.clone() {
+            let target = state.surface.wl_surface().clone();
+            let handler = InputHandler::new(&seat, target, &qh)
+                .map_err(|e| RenderError::Input(e.to_string()))?;
+            state.input_handler = Some(handler);
         }
 
         let pool = BufferPool::new(&state.shm, init_w, init_h)?;
@@ -126,18 +147,22 @@ impl Renderer {
         self.state.wl_surface()
     }
 
-    /// Retourne le `WlSeat` pour construire un `InputHandler`.
+    /// Récupère le prochain événement d'entrée souris en attente, non bloquant.
     ///
-    /// # Panics
-    /// Panique si aucun `wl_seat` n'a été annoncé par le compositor au moment de
-    /// l'initialisation. En pratique tout compositor Wayland expose au moins un
-    /// seat ; l'absence relèverait d'un environnement dégradé.
-    #[must_use]
-    pub fn wl_seat(&self) -> &WlSeat {
-        self.state
-            .seat
-            .as_ref()
-            .expect("aucun wl_seat annoncé par le compositor")
+    /// L'input est géré en interne par ce crate ; le binaire n'a donc plus à
+    /// construire de `InputHandler`. Retourne `None` si aucun événement n'est en
+    /// file (ou si aucun seat n'était disponible à l'initialisation).
+    pub fn poll_input(&mut self) -> Option<InputEvent> {
+        self.state.input_handler.as_mut()?.poll()
+    }
+
+    /// Met à jour la position du sprite pour le hit-testing de l'input.
+    ///
+    /// Sans effet si aucun `InputHandler` n'a pu être construit.
+    pub fn set_sprite_pos(&mut self, pos: Vec2) {
+        if let Some(handler) = self.state.input_handler.as_mut() {
+            handler.set_sprite_pos(pos);
+        }
     }
 
     /// Retourne les dimensions du moniteur principal `(width, height)`.
@@ -368,8 +393,9 @@ impl SeatHandler for AppState {
         _seat: WlSeat,
         _capability: Capability,
     ) {
-        // La souscription effective du pointeur est faite par `hyprmeji-input`
-        // à partir du `WlSeat` exposé ; rien à faire ici.
+        // La souscription effective du pointeur est faite par l'`InputHandler`
+        // construit dans `Renderer::new` à partir du `WlSeat` retenu ; rien à
+        // faire ici.
     }
 
     fn remove_capability(
@@ -382,10 +408,29 @@ impl SeatHandler for AppState {
     }
 
     fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: WlSeat) {
-        // Si le seat retenu disparaît, on l'oublie pour éviter d'exposer un
-        // proxy mort.
+        // Si le seat retenu disparaît, on l'oublie et on libère l'input qui en
+        // dépend pour éviter d'exposer un proxy mort.
         if self.seat.as_ref() == Some(&seat) {
             self.seat = None;
+            self.input_handler = None;
+        }
+    }
+}
+
+impl PointerHandler for AppState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &WlPointer,
+        events: &[PointerEvent],
+    ) {
+        // Les événements pointer arrivent dans `AppState` via le délégué SCTK et
+        // sont relayés à l'`InputHandler` qui vit dans ce même état. On passe par
+        // `ingest_events` (neutre vis-à-vis du type de file) pour éviter tout
+        // mismatch de `QueueHandle`.
+        if let Some(handler) = self.input_handler.as_mut() {
+            handler.ingest_events(events);
         }
     }
 }
@@ -412,6 +457,7 @@ impl smithay_client_toolkit::reexports::client::Dispatch<WlRegion, ()> for AppSt
 delegate_compositor!(AppState);
 delegate_output!(AppState);
 delegate_seat!(AppState);
+delegate_pointer!(AppState);
 delegate_shm!(AppState);
 delegate_layer!(AppState);
 delegate_registry!(AppState);

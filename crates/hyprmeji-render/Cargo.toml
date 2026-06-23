@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 hyprmeji-core = { path = "../hyprmeji-core" }
+hyprmeji-input = { path = "../hyprmeji-input" }
 smithay-client-toolkit = "0.18"
 thiserror = "1"
 log = "0.4"

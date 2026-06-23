@@ -3,10 +3,12 @@
 
 //! Boucle principale 60fps (§9 de l'ARCHITECTURE.md).
 //!
-//! Orchestration pure : la boucle lit les entrées (input, window list, timer
-//! idle), les traduit en `Event`, fait avancer la machine d'états (fonction
-//! libre `transition`) et la physique (`PhysicsEngine`), puis demande le rendu.
-//! Aucune règle métier n'est décidée ici — tout est délégué à `hyprmeji-core`.
+//! Orchestration pure : la boucle lit les entrées (input via le renderer,
+//! window list, timer idle), les traduit en `Event`, fait avancer la machine
+//! d'états (fonction libre `transition`) et la physique (`PhysicsEngine`), puis
+//! demande le rendu. Aucune règle métier n'est décidée ici — tout est délégué à
+//! `hyprmeji-core`. L'input souris est exposé par `hyprmeji-render` via
+//! `Renderer::poll_input`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use hyprmeji_core::{
     transition, AnimationPlayer, Event, PhysicsBody, PhysicsConfig, PhysicsEngine, Rect, Screen,
     State, Vec2,
 };
-use hyprmeji_input::{InputEvent, InputHandler};
+use hyprmeji_input::InputEvent;
 use hyprmeji_ipc::WindowInfo;
 use hyprmeji_render::Renderer;
 
@@ -33,7 +35,6 @@ pub struct Context {
     pub sprite_sheet: hyprmeji_core::SpriteSheet,
     pub window_list: Arc<RwLock<Vec<WindowInfo>>>,
     pub renderer: Renderer,
-    pub input: InputHandler,
     pub shutdown: Arc<AtomicBool>,
 }
 
@@ -43,7 +44,6 @@ pub fn run(ctx: Context) {
         sprite_sheet,
         window_list,
         mut renderer,
-        mut input,
         shutdown,
     } = ctx;
 
@@ -69,14 +69,14 @@ pub fn run(ctx: Context) {
     log::info!("boucle principale démarrée (tick = {dt_ms} ms)");
 
     while !shutdown.load(Ordering::SeqCst) {
-        // 1./2. Pompage Wayland + lecture de l'input souris.
+        // 1./2. Pompage Wayland + lecture de l'input souris (via le renderer).
         if let Err(e) = renderer.pump() {
             log::warn!("pump Wayland échoué : {e}");
         }
 
         let mut pending: Vec<Event> = Vec::new();
 
-        while let Some(event) = input.poll() {
+        while let Some(event) = renderer.poll_input() {
             match event {
                 InputEvent::DragStart { .. } => {
                     pending.push(Event::DragStart);
@@ -164,7 +164,7 @@ pub fn run(ctx: Context) {
         }
 
         let pos = body.pos;
-        input.set_sprite_pos(pos);
+        renderer.set_sprite_pos(pos);
 
         // 8. Rendu de la frame
         if let Err(e) = renderer.render_frame(&frame, pos) {

@@ -10,8 +10,10 @@
 //!   4. installer la gestion des signaux OS,
 //!   5. déléguer à la boucle principale (`r#loop`).
 //!
-//! Toute la logique (états, physique, animation, Wayland) vit dans les crates
-//! `hyprmeji-core`, `hyprmeji-render`, `hyprmeji-ipc` et `hyprmeji-input`.
+//! Toute la logique (états, physique, animation, Wayland, input) vit dans les
+//! crates `hyprmeji-core`, `hyprmeji-render` et `hyprmeji-ipc`. L'input souris
+//! est géré en interne par `hyprmeji-render` : le binaire ne construit plus de
+//! `InputHandler` et se contente d'appeler `renderer.poll_input()`.
 
 mod r#loop;
 
@@ -22,7 +24,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use hyprmeji_input::InputHandler;
 use hyprmeji_ipc::IpcClient;
 use hyprmeji_loader as loader;
 use hyprmeji_render::Renderer;
@@ -55,8 +56,8 @@ fn main() -> ExitCode {
 
 /// Séquence d'initialisation puis exécution de la boucle.
 ///
-/// Renvoie `Err` pour toute erreur fatale de démarrage (loader, ipc, render,
-/// input) ; l'appelant logge et quitte avec le code 1.
+/// Renvoie `Err` pour toute erreur fatale de démarrage (loader, ipc, render) ;
+/// l'appelant logge et quitte avec le code 1.
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --- 1. Drapeau d'arrêt partagé, armé par les signaux OS ---------------
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -78,25 +79,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let _ipc_handle = ipc.start_listener();
     log::info!("thread IPC Hyprland démarré");
 
-    // --- 4. Rendu Wayland (surface overlay layer-shell) -------------------
+    // --- 4. Rendu Wayland (surface overlay layer-shell + input intégré) ----
+    // L'input souris est construit et géré en interne par le renderer.
     let renderer = Renderer::new().map_err(|e| format!("initialisation du rendu Wayland : {e}"))?;
     log::info!("surface Wayland initialisée");
 
-    // --- 5. Entrée souris ------------------------------------------------
-    let input = InputHandler::new(
-        renderer.wl_seat(),
-        renderer.wl_surface().clone(),
-        renderer.qh(),
-    )
-    .map_err(|e| format!("initialisation de l'input : {e}"))?;
-    log::info!("gestionnaire d'input initialisé");
-
-    // --- 6. Boucle principale 60fps --------------------------------------
+    // --- 5. Boucle principale 60fps --------------------------------------
     r#loop::run(r#loop::Context {
         sprite_sheet,
         window_list,
         renderer,
-        input,
         shutdown,
     });
 
